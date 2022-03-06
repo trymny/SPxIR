@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
 import cv2 as cv
+from scipy import signal, misc
+from mpl_toolkits.mplot3d import Axes3D
 
 def stereoImgResize(imgL,imgR, scale_percent,interMethod):
     width = int(imgL.shape[1] * scale_percent / 100)
@@ -26,40 +28,84 @@ def stereoImgResize(imgL,imgR, scale_percent,interMethod):
 
     return imgL, imgR
 
-def stereoImgCrop(imgL, imgR, xL,yL,xR,yR,N,M):
-    winL = imgL[int(yL-N/2):int(yL+N/2), int(xL-M/2):int(xL+M/2)]
-    winR = imgR[int(yR-N/2):int(yR+N/2), int(xR-M/2):int(xR+M/2)]
-    print("Window size: ", winL.shape)
-    return winL, winR
+def stereoImgCrop(img,X,Y,N,M):
+    win = img[int(Y-(N/2)):int(Y+(N/2)), int(X-(M/2)):int(X+(M/2))]
+    #print("Window size: ", winL.shape)
+    return win
 
 def stereoImgAddNoise(img):
-    noise = np.random.uniform(img[:,:].min(),img[:,:].max(),len(img))
-    return img + noise
+    img = (img - np.mean(img)) / np.std(img)
+    return img 
 
-def windowFunc(funcType, winL,winR):
-    width,height = winL.shape
+def windowFunc(funcType, win):
+    width,height = win.shape
     Ww=eval('np.'+funcType+'(width)')
     Wh=eval('np.'+funcType+'(height)')
     windowFilter=np.outer(Ww,Wh)
-    winL = winL * windowFilter
-    winR = winR * windowFilter
-    return winL,winR
+    win = win * windowFilter
+    return win
 
-def computeSubPixelShift(dominantSingularVec):
-    singVecAngle = np.angle(dominantSingularVec)  #Find the angle
-    unwrapSingVec = np.unwrap(singVecAngle)
+def magMask(dft,param=0):
+    for i in range(dft.shape[0]):
+        maxValue = abs(np.max(dft[i]))
+        if(maxValue <= param):
+            dft[i] = 0.00001   # zeroes out row i
+            dft[:,i] = 0.00001 # zeroes out column i
+    return dft
+
+def radMask(dft,param=0.6):
+    N = dft.shape[1]
+    radius = param*((N)/(2))
+    maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius)]
+    return maskedDft
+
+def computeSubPixelShift(dftL,dftR, radius=0.6, magThres=0):
+    
+    M = dftL.shape[0]
+    N = dftL.shape[1]
+
+    dftShiftL = np.fft.fftshift(dftL)
+    dftShiftR = np.fft.fftshift(dftR)
+    
+    #Mask out spectral components that lie outside a radius from the central peak
+    maskedDftL = radMask(dftShiftL,radius)
+    maskedDftR = radMask(dftShiftR,radius)
+    
+    #Mask out spectral components for DFT's that have peaks with magnitudes less than a threshold value
+    #maskedDftL = magMask(maskedDftL,magThres)
+    maskedDftR = magMask(maskedDftR,magThres)
+
+    # Normalized cross-power spectrum 
+    R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
+
+    #plotDFT("Frequency Spectrum Left Image",maskedDftL)
+    #plotDFT("Frequency Spectrum Right Image",maskedDftR)
+
+    U,S,V  = np.linalg.svd(R) #Reduce from 2D to 1D 
+
+    dominantV = V[np.argmax(S),:]
+    dominantU = U[:,np.argmax(S)]
 
     A = []
-    for i in range(len(dominantSingularVec)):
+    for i in range(len(V)):
         A.append(i)
-
     A = np.vstack([A, np.ones(len(A))]).T #Refered to as R in the paper
-    fittedLine, res,rank,s = np.linalg.lstsq(A,unwrapSingVec,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
 
-    mu = fittedLine[0] #slope of the fitted line
-    #c = fittedLine[1] #abscissa of the fitted line
+    angleV = np.angle(dominantV)  #Find the angle
+    unwrapV = np.unwrap(angleV)
+    fittedLineV, res,rank,s = np.linalg.lstsq(A,unwrapV,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
+    muX = fittedLineV[0] #slope of the fitted line
+    #cX = fittedLineV[1] #abscissa of the fitted line
+    subShiftX = muX * (M / (2*np.pi)) #translational shift
 
-    return mu
+    angleU = np.angle(dominantU)  #Find the angle
+    unwrapU = np.unwrap(angleU)
+    fittedLineU, res,rank,s = np.linalg.lstsq(A,unwrapU,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
+    muY = fittedLineU[0] #slope of the fitted line
+    #cY = fittedLineU[1] #abscissa of the fitted line
+    subShiftY = muY * (N / (2*np.pi)) #translational shift
+
+    return subShiftX,subShiftY
 
 def computePOC(dftL,dftR):
 
@@ -79,6 +125,42 @@ def computePOC(dftL,dftR):
     POC = cv.GaussianBlur(POC,(5,5),0)
 
     return POC
+
+def similarityMeasure(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc = "blackman"):
+
+    # Creating a window around the feature
+    winL = stereoImgCrop(imgL, X_L, Y_L, M, N)
+
+    # Applying blackman window 
+    winL = windowFunc("blackman",winL) #funcType: blackman, hanning,
+
+    x = X_L-200
+    maxPeak = []
+    xList = []
+    while(x < X_L+M):
+        winR = stereoImgCrop(imgR, x, Y_L, M, N) 
+        winR = windowFunc(winFunc,winR)
+
+        if method == "TM_CCORR_NORMED":
+            res = cv.matchTemplate(winR.astype(np.float32),winL.astype(np.float32),cv.TM_CCORR_NORMED)
+            min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
+            maxPeak.append(max_val)
+        elif method == "TM_CCOEFF_NORMED":
+            res = cv.matchTemplate(winR.astype(np.float32),winL.astype(np.float32),cv.TM_CCOEFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
+            maxPeak.append(max_val)
+        elif method == "POC":
+            dftL = np.fft.fft2(winL)
+            dftR = np.fft.fft2(winR)
+            POC = computePOC(dftL,dftR)
+            maxPeak.append(np.max(POC))
+        
+        xList.append(x)
+        x=x+1
+    #print("maxPeak: ", maxPeak[np.argmax(maxPeak)], " x: ", xList[np.argmax(maxPeak)])
+    winR = stereoImgCrop(imgR, xList[np.argmax(maxPeak)], Y_L, M, N) 
+    winR = windowFunc(winFunc,winR)
+    return winL, winR,xList[np.argmax(maxPeak)]
 
 def plotPhaseDifference(dftL,dftR,rStepSize=2, cStepSize=2, aa=True):
 
