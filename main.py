@@ -81,14 +81,14 @@ dftShiftR = np.fft.fftshift(dftR)
 magSpecL = 20*np.log(np.abs(dftShiftL))
 magSpecR = 20*np.log(np.abs(dftShiftR))
 
-''' 
+''' '''
 f, axarr = plt.subplots(2,2)
 axarr[0,0].imshow((winL),cmap='gray')
 axarr[0,1].imshow(winR,cmap='gray')
 axarr[1,0].imshow(magSpecL,cmap='gray')
 axarr[1,1].imshow(magSpecR,cmap='gray')
 plt.show()
-'''
+
 
 #**IMAGE REGISTRATION IN THE SPATIAL DOMAIN USING POC (INTEGER PRECISION)**
 
@@ -102,11 +102,11 @@ print("intShiftX: ",intShiftX, "                  [PC WITH DFT]")
 #fc.plotPhaseDifference(dftL,dftR)
 
 #******IMAGE REGISTRATION IN THE FOURIER DOMAIN [SUB-PIXEL PRECISION]******
-subShiftX,subShiftY = fc.computeSubSpaceID(dftL,dftR,radius=0.4, magThres=0)
+subShiftX,subShiftY = fc.computeSubSpaceID(dftL,dftR,radius=0.4, magThres=0,plot=True)
 
 print("subShiftX: ",round(subShiftX, 3), "                [SUB-PIXEL (Subspace identification)]")
 
-subShiftX2 = fc.computeGradCorr(winL,winR)
+subShiftX2 = fc.computeGradCorr(winL,winR,plot=True)
 print("subShiftX: ",round(subShiftX2,3), "                [SUB-PIXEL (Gradient Correlation)]")
 
 

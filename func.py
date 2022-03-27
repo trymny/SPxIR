@@ -55,7 +55,7 @@ def radMask(dft,param=0.6):
     maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius)]
     return maskedDft
 
-def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0):
+def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0, plot=False):
     
     M = dftL.shape[0]
     N = dftL.shape[1]
@@ -73,9 +73,6 @@ def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0):
 
     # Normalized cross-power spectrum 
     R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
-
-    #plotDFT("Frequency Spectrum Left Image",maskedDftL)
-    #plotDFT("Frequency Spectrum Right Image",maskedDftR)
 
     U,S,V  = np.linalg.svd(R) #Reduce from 2D to 1D 
 
@@ -102,24 +99,29 @@ def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0):
     #cY = fittedLineU[1] #abscissa of the fitted line
     subShiftY = muY * (N / (2*np.pi)) #translational shift
 
-    ''' 
-    temp = unwrapV.shape[0]
-    fx= (np.linspace(-temp/2,temp/2-1,temp)/temp);    # FM = number of pixel in x direction 
-    fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
-    fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
+    if plot: 
+        plotDFT("Frequency Spectrum Left Image",maskedDftL)
+        plotDFT("Frequency Spectrum Right Image",maskedDftR)
 
-    fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
-    axarr[0].set_title("Phase difference")
-    axarr[0].grid(True)
-    axarr[0].plot(fx, angleV)
-    axarr[1].set_title("Unwrapped Phase difference")
-    axarr[1].grid(True)
+        temp = unwrapV.shape[0]
+        fx= (np.linspace(-temp/2,temp/2-1,temp)/temp);    # FM = number of pixel in x direction 
+        fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
+        fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
+
+        fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
+        axarr[0].set_title("Phase difference")
+        axarr[0].grid(True)
+        axarr[0].plot(fx, angleV)
+        
+        x = np.linspace(0,temp,temp)
+        axarr[1].set_title("Unwrapped Phase difference")
+        axarr[1].grid(True)
+        axarr[1].plot(x, unwrapV)
+        axarr[1].plot(x, muX*x+cX)
+        axarr[1].text(0,max(unwrapV),"X-shift: "+str(round(subShiftX,3)),fontsize=12)
+        axarr[1].text(max(x)/2,(max(unwrapV)+min(unwrapV))/2,str(muY))
+        plt.show()
     
-    x = np.linspace(0,temp,temp)
-    axarr[1].plot(x, unwrapV)
-    axarr[1].plot(x, muX*x+cX)
-    plt.show()
-    '''
     
     return subShiftX,subShiftY
 
@@ -149,10 +151,10 @@ def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
     for i in range(int(M/2)):
         cc = np.roll(cc, -1, axis=1)
 
-    #fc.plotSurface(cc)
+    cc = cc.real
+    #plotSurface(cc)
     
     idxMax = np.unravel_index(cc.argmax(), cc.shape) 
-    #print(idxMax)
     
     dist = 1
     y = np.array([cc[idxMax[0],idxMax[1]-dist], cc[idxMax[0],idxMax[1]], cc[idxMax[0],idxMax[1]+dist]])
@@ -162,6 +164,9 @@ def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
     p = np.poly1d(fit) 
     newX = np.linspace(idxMax[1]-dist,idxMax[1]+dist,nPoints)
     
+    maxPeak = [newX[np.argmax(p(newX))],p(newX[np.argmax(p(newX))])]
+    x_shift = int(M/2)-maxPeak[0]
+
     if plot:
         temp = M
         xx = np.linspace(0,temp,temp).astype(int)  
@@ -172,9 +177,10 @@ def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
         axarr.plot(x[0],y[0], marker="o", color="green")
         axarr.plot(x[1],y[1], marker="o", color="green")
         axarr.plot(x[2],y[2], marker="o", color="green")
+        axarr.text(maxPeak[0],maxPeak[1],str(x_shift),horizontalalignment='right')
         plt.show()
     
-    return int(M/2)-newX[np.argmax(p(newX))]
+    return x_shift
 
 def computePOC(dftL,dftR, plot = False):
 
@@ -214,14 +220,18 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
     winL = stereoImgCrop(imgL, X_L, Y_L, M, N)
 
     # Applying blackman window 
-    winL = windowFunc(winFunc,winL) #funcType: blackman, hanning,
+    if winFunc != "False":
+        winL = windowFunc(winFunc,winL) #funcType: blackman, hanning,
 
-    x = X_L-int(imgL.shape[0]/4)
+    x = int(M/2)
     maxVal = []
+    minVal = []
     xList = []
-    while(x < X_L+M):
+    while(x < X_L):
         winR = stereoImgCrop(imgR, x, Y_L, M, N) 
-        winR = windowFunc(winFunc,winR)
+        
+        if winFunc != "False":
+            winR = windowFunc(winFunc,winR)
 
         if method == "TM_CCORR_NORMED":
             res = cv.matchTemplate(winR.astype(np.float32),winL.astype(np.float32),cv.TM_CCORR_NORMED)
@@ -231,18 +241,31 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
             res = cv.matchTemplate(winR.astype(np.float32),winL.astype(np.float32),cv.TM_CCOEFF_NORMED)
             min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
             maxVal.append(max_val)
+        elif method == "TM_SQDIFF_NORMED":
+            res = cv.matchTemplate(winR.astype(np.float32),winL.astype(np.float32),cv.TM_SQDIFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
+            minVal.append(min_val)
         elif method == "POC":
             dftL = np.fft.fft2(winL)
             dftR = np.fft.fft2(winR)
             POC = computePOC(dftL,dftR)
             maxVal.append(np.max(POC))
-        
         xList.append(x)
         x=x+1
-    print("maxVal: ", maxVal[np.argmax(maxVal)], " x: ", xList[np.argmax(maxVal)])
-    winR = stereoImgCrop(imgR, xList[np.argmax(maxVal)], Y_L, M, N) 
-    winR = windowFunc(winFunc,winR)
-    return winL, winR,xList[np.argmax(maxVal)]
+    
+    if winFunc != "False":
+        winR = windowFunc(winFunc,winR)
+    
+    if method == "TM_SQDIFF_NORMED":
+        #print("minVal: ", minVal[np.argmin(minVal)], " x: ", xList[np.argmin(minVal)])
+        xShift = xList[np.argmin(minVal)]
+    else:
+        #print("maxVal: ", maxVal[np.argmax(maxVal)], " x: ", xList[np.argmax(maxVal)])
+        xShift = xList[np.argmax(maxVal)]
+
+    winR = stereoImgCrop(imgR, xShift, Y_L, M, N) 
+
+    return winL, winR, xShift
 
 def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
 
