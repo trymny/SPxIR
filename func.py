@@ -14,6 +14,7 @@ import matplotlib
 import numpy as np
 import cv2 as cv
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import RectBivariateSpline
 
 
 def stereoImgResize(imgL,imgR, scale_percent,interMethod):
@@ -55,8 +56,32 @@ def radMask(dft,param=0.6):
     maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius)]
     return maskedDft
 
-def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0, plot=False):
-    
+def computeSID(dftL,dftR, radius=0.6, magThres=0, plot=False):
+    ''' 
+    Subspace identification (SID) method for sub-pixel estimation.
+    SID is an extension to the Phase Correlation Method and developed by William Scott Hoge
+    and based on the paper "A Subspace Identification Extension to the Phase Correlation Method"
+    Pros:
+        Accurate and robust for images with large shifts or rotations. 
+        Consistent results even for images with low correlation.
+        Can achieve up to 1/20th pixel accuracy
+    Cons:
+        SVD can be quite slow and may become unstable for very small images
+        Can be sensitive to aliasing effects during image acquisition and edge effects caused by the DFT
+
+    Preprocessing:
+    A window function such as a Hamming or a Blackman window should be applied to each image to avoid edge
+    effects.
+    Masking out higher frequencies in the Normalized cross-power spectrum R should be performed 
+    in order to reduce the impact of aliasing.
+
+    How to use:
+    plot = True 
+        Subplot of the phase difference and the 1D unwrapped phase difference.
+        Plot of Frequency Spectrum of the discrete Fourier transform.
+    Radius 
+    '''
+
     M = dftL.shape[0]
     N = dftL.shape[1]
 
@@ -109,37 +134,57 @@ def computeSubSpaceID(dftL,dftR, radius=0.6, magThres=0, plot=False):
         fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
 
         fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
-        axarr[0].set_title("Phase difference")
+        axarr[0].set_title("Phase component")
         axarr[0].grid(True)
         axarr[0].plot(fx, angleV)
         
         x = np.linspace(0,temp,temp)
-        axarr[1].set_title("Unwrapped Phase difference")
+        axarr[1].set_title("Unwrapped Phase component")
         axarr[1].grid(True)
         axarr[1].plot(x, unwrapV)
-        axarr[1].plot(x, muX*x+cX)
-        axarr[1].text(0,max(unwrapV),"X-shift: "+str(round(subShiftX,3)),fontsize=12)
-        axarr[1].text(max(x)/2,(max(unwrapV)+min(unwrapV))/2,str(muY))
+        line, = axarr[1].plot(x, muX*x+cX, "--")
+        line.set_label('Fitted line')
+        axarr[1].text(0,max(unwrapV),"Estimated shift: "+str(round(subShiftX,3)),fontsize=12)
+        axarr[1].text(max(x)/2,(max(unwrapV)+min(unwrapV))/2,"Slope: "+str(round(muY,7)))
+        axarr[1].legend(fontsize=15, bbox_to_anchor=(1, 0.15))
         plt.show()
     
     
     return subShiftX,subShiftY
 
-def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
+def computeGradCorr(img, img2, gradMethod = "hvdiff", polyDeg = 2, nPoints = 200, plot = False):
     M = img.shape[0]
+ 
+    if gradMethod == "hvdiff":
 
-    gHor = np.zeros_like(img)
-    gVer = np.zeros_like(img)
-    gHor2 = np.zeros_like(img2)
-    gVer2 = np.zeros_like(img2)
+        gHor = np.zeros_like(img.astype('float64'))
+        gVer = np.zeros_like(img.astype('float64'))
+        gHor2 = np.zeros_like(img2.astype('float64'))
+        gVer2 = np.zeros_like(img2.astype('float64'))
+       
+        for i in range(1,img.shape[0]-1):
+            for j in range(1,img.shape[1]-1):
+                gHor[i,j] = (int(img[i+1,j])-int(img[i-1,j]))
+                gVer[i,j] = (int(img[i,j+1])-int(img[i,j-1]))
+                gHor2[i,j] = (int(img2[i+1,j])-int(img2[i-1,j]))
+                gVer2[i,j] = (int(img2[i,j+1])-int(img2[i,j-1]))
+        
+    elif gradMethod == "sobel":
+        gHor = cv.Sobel(img,cv.CV_64F,1,0,ksize=5)
+        gVer = cv.Sobel(img,cv.CV_64F,0,1,ksize=5)
+        gHor2 = cv.Sobel(img2,cv.CV_64F,1,0,ksize=5)
+        gVer2 = cv.Sobel(img2,cv.CV_64F,0,1,ksize=5)
+    elif gradMethod == "scharr":
+        gHor = cv.Scharr(img, cv.CV_64F, 1, 0) 
+        gVer = cv.Scharr(img, cv.CV_64F, 0, 1) 
+        gHor2 = cv.Scharr(img2, cv.CV_64F, 1, 0) 
+        gVer2 = cv.Scharr(img2, cv.CV_64F, 0, 1) 
+    elif gradMethod == "False":
+        gHor = img
+        gVer = img
+        gHor2 = img2
+        gVer2 = img2
 
-    for i in range(1,img.shape[0]-1):
-        for j in range(1,img.shape[1]-1):
-            gVer[i,j] = (int(img[i+1,j])-int(img[i-1,j]))
-            gHor[i,j] = (int(img[i,j+1])-int(img[i,j-1]))
-            gVer2[i,j] = (int(img2[i+1,j])-int(img2[i-1,j]))
-            gHor2[i,j] = (int(img2[i,j+1])-int(img2[i,j-1]))
-    
     g = gHor - np.imag(gVer)
     g2 = gHor2 - np.imag(gVer2)
 
@@ -168,6 +213,7 @@ def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
     x_shift = int(M/2)-maxPeak[0]
 
     if plot:
+         
         temp = M
         xx = np.linspace(0,temp,temp).astype(int)  
         fig, axarr = plt.subplots(1,1)
@@ -179,40 +225,111 @@ def computeGradCorr(img, img2, polyDeg = 2, nPoints = 200, plot = False):
         axarr.plot(x[2],y[2], marker="o", color="green")
         axarr.text(maxPeak[0],maxPeak[1],str(x_shift),horizontalalignment='right')
         plt.show()
+         
+        f, axarr = plt.subplots(1,2)
+        axarr[0].imshow(img,cmap='gray')
+        axarr[1].imshow(cv.addWeighted(gHor, 0.5, gVer, 0.5, 0),cmap='gray')
+        f.suptitle(gradMethod)
+        axarr[1].set_title(str(x_shift))
+        plt.show()
+        
     
     return x_shift
 
-def computePOC(dftL,dftR, plot = False):
+def computePC(dftL,dftR,  polyDeg = 2, nPoints = 200,  subpx = True, plot = False):
+
+    M = dftL.shape[0]
 
     # Normalized cross-power spectrum 
     R = (dftL*np.conjugate(dftR))/(np.abs(dftL*np.conjugate(dftR)))  
 
     # Taking the inverse discrete Fourier transform to find the phase correlation
-    POC = np.fft.ifft2(R)
+    PC = np.fft.ifft2(R)
 
     # Using the fourier shif theorem to move the maximum peak
-    POC = np.fft.fftshift(POC)
+    PC = np.fft.fftshift(PC)
     
     # Compute magnitude
-    POC = abs(POC)
+    PC = abs(PC)
 
     # Using a 2d Gaussian distribution to smooth the phase correlation and to remove false peaks
-    POC = cv.GaussianBlur(POC,(5,5),0)
+    PC = cv.GaussianBlur(PC,(5,5),0)
+
+    idxMax = np.unravel_index(PC.argmax(), PC.shape) # Extract indices of max peak from POC function 
+    if subpx:
+        dist = 1
+        y = np.array([PC[idxMax[0],idxMax[1]-dist], PC[idxMax[0],idxMax[1]], PC[idxMax[0],idxMax[1]+dist]])
+        x = np.linspace(idxMax[1]-dist,idxMax[1]+dist,3).astype(int)
+
+        fit = np.polyfit(x,y,polyDeg)
+        p = np.poly1d(fit) 
+        newX = np.linspace(idxMax[1]-dist,idxMax[1]+dist,nPoints)
+        
+        maxPeak = [newX[np.argmax(p(newX))],p(newX[np.argmax(p(newX))])]
+        xShift = int(M/2)-maxPeak[0]
+
+        if plot:
+            xx = np.linspace(0,M,M).astype(int)  
+            fig, axarr = plt.subplots(1,1)
+            axarr.grid(True)
+            axarr.plot(xx, PC[idxMax[0],:] )
+            axarr.plot(newX,p(newX))
+            axarr.plot(x[0],y[0], marker="o", color="green")
+            axarr.plot(x[1],y[1], marker="o", color="green")
+            axarr.plot(x[2],y[2], marker="o", color="green")
+            plt.show()
+
+            #plotSurface(PC)
+
+    else:
+        yShift = int(PC.shape[0]/2-idxMax[0])       # Compute integer shift Y from the max peak in POC function
+        xShift = int(PC.shape[1]/2-idxMax[1])       # Compute integer shift X from the max peak in POC function
+        
+        if plot:
+            print("POC Max Peak: ", np.max(PC))
+            plotSurface(PC)
+            plt.figure()
+            plt.imshow(PC,cmap='gray')
+            plt.show()
+
+    return xShift
+
+def computeCCinter(imgL, imgR, plot=False):
+    M = imgL.shape[0]
+    dftG = (np.fft.fft2(imgL))
+    dftG2 = (np.fft.fft2(imgR))
+    cc = np.fft.ifft2(dftG*np.conjugate(dftG2))
+    for i in range(int(M/2)):
+            cc = np.roll(cc, -1, axis=1)
+    for i in range(int(M/2)):
+            cc = np.roll(cc, -1, axis=0)
+    cc = cc.real
+    idxMax = np.unravel_index(cc.argmax(), cc.shape)   
+    dist = 3
+    z = cc[idxMax[0]-dist:idxMax[0]+dist+1,idxMax[1]-dist:idxMax[1]+dist+1]
+    x = np.linspace(idxMax[1]-dist,idxMax[1]+dist,z.shape[0])
+    y = np.linspace(idxMax[0]-dist,idxMax[0]+dist,z.shape[1])
+    X, Y = np.meshgrid(x, y)
+
+    interp_spline = RectBivariateSpline(y, x, z, kx=4, ky=4)
+
+    dx2, dy2 = 0.1, 0.1
+    x2 = np.arange(x[0], x[-1], dx2)
+    y2 = np.arange(y[0], y[-1], dy2)
+    X2, Y2 = np.meshgrid(x2,y2)
+    Z2 = interp_spline(y2, x2)
 
     if plot:
-        print("POC Max Peak: ", np.max(POC))
-        plt.figure()
-        plt.imshow(POC,cmap='gray')
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot_surface(X2, Y2, Z2,color='y',alpha=0.5)
+        ax.plot(X.ravel(), Y.ravel(), z.ravel(), "ok")
+        fig.tight_layout()
         plt.show()
 
-    return POC
-
-def computePOCshift(POC):
-    # Determine the location of the max peak in the POC function
-    idxPeak = np.unravel_index(POC.argmax(), POC.shape) # Extract indices of max peak from POC function 
-    intShiftY = (POC.shape[0]/2-idxPeak[0])       # Compute integer shift Y from the max peak in POC function
-    intShiftX = (POC.shape[1]/2-idxPeak[1])       # Compute integer shift X from the max peak in POC function
-    return intShiftX,intShiftY
+    idxMax = np.unravel_index(Z2.argmax(), Z2.shape)  
+    x_shift = int(M/2)-X2[idxMax[0],idxMax[1]]
+    return x_shift
 
 def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc = "blackman"):
 
@@ -223,10 +340,17 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
     if winFunc != "False":
         winL = windowFunc(winFunc,winL) #funcType: blackman, hanning,
 
-    x = int(M/2)
+    #**************NEEDS TO BE IMPROVED****************
+    guess  = 160
+    if(X_L-guess <= M/2):
+        while(X_L-guess <= M/2):
+            guess = guess-1
+             
+    x = X_L-guess 
     maxVal = []
     minVal = []
     xList = []
+   
     while(x < X_L):
         winR = stereoImgCrop(imgR, x, Y_L, M, N) 
         
@@ -248,13 +372,10 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
         elif method == "POC":
             dftL = np.fft.fft2(winL)
             dftR = np.fft.fft2(winR)
-            POC = computePOC(dftL,dftR)
+            POC = computePC(dftL,dftR)
             maxVal.append(np.max(POC))
         xList.append(x)
         x=x+1
-    
-    if winFunc != "False":
-        winR = windowFunc(winFunc,winR)
     
     if method == "TM_SQDIFF_NORMED":
         #print("minVal: ", minVal[np.argmin(minVal)], " x: ", xList[np.argmin(minVal)])
@@ -262,8 +383,11 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
     else:
         #print("maxVal: ", maxVal[np.argmax(maxVal)], " x: ", xList[np.argmax(maxVal)])
         xShift = xList[np.argmax(maxVal)]
-
+    
     winR = stereoImgCrop(imgR, xShift, Y_L, M, N) 
+    
+    if winFunc != "False":
+        winR = windowFunc(winFunc,winR)
 
     return winL, winR, xShift
 
@@ -273,14 +397,14 @@ def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
     dftShiftR = np.fft.fftshift(dftR)
 
     #Mask out spectral components that lie outside a radius from the central peak
-    maskedDftL = radMask(dftShiftL,radius)
-    maskedDftR = radMask(dftShiftR,radius)
+    #maskedDftL = radMask(dftShiftL,radius)
+    #maskedDftR = radMask(dftShiftR,radius)
     
     #Mask out spectral components for DFT's that have peaks with magnitudes less than a threshold value
     #maskedDftL = magMask(maskedDftL,magThres)
     #maskedDftR = magMask(maskedDftR,0)
 
-    R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
+    R = (dftShiftL*np.conjugate(dftShiftR))/(np.abs(dftShiftL*np.conjugate(dftShiftR)))  
     
     theta = np.arctan2(R.imag,R.real)  #Can also use theta = np.angle(R) 
 
