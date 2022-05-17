@@ -56,6 +56,135 @@ def radMask(dft,param=0.6):
     maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius)]
     return maskedDft
 
+def RANSAC(xData,yData, MAX_ITER, DIST_THRES):
+    maxInliers = 0
+    maxCoef = [0,0]
+    for i in range(MAX_ITER):
+        #print("-----------------------")
+        #Step 1 Select two random points
+        X = np.array([0,0])
+        Y = np.array([0,0])
+        while (X[0] == X[1] and Y[0] == Y[1]):
+            ranPoint1 = np.random.randint(0,len(xData))
+            ranPoint2 = np.random.randint(0,len(xData))
+            X = np.array([xData[ranPoint1],xData[ranPoint2]])
+            Y = np.array([yData[ranPoint1],yData[ranPoint2]])
+
+        #Step 2 Fit a line 
+        coef = np.polyfit(X,Y,1)
+        poly1d_fn = np.poly1d(coef)
+
+        #Step 3 Distance from line
+        inliers = 0
+        for n in range (len(xData)):
+            a = coef[0]/coef[1]
+            b = 1/coef[1]
+            d = abs(a*xData[n] - b*yData[n]+1)/np.sqrt(a**2+b**2)
+            if d > 0.01 and d < DIST_THRES:
+                inliers += 1
+                    
+        # Step 4
+        if (maxInliers < inliers):
+            maxInliers = inliers
+            maxX = X
+            maxY = Y
+            maxCoef = coef 
+
+    return maxInliers, maxX,maxY,maxCoef
+
+def SID_RANSAC(dftL,dftR, radius=0.6, magThres=0, plot=False):
+    ''' 
+    Subspace identification (SID) method for sub-pixel estimation.
+    SID is an extension to the Phase Correlation Method and developed by William Scott Hoge
+    and based on the paper "A Subspace Identification Extension to the Phase Correlation Method"
+    Pros:
+        Accurate and robust for images with large shifts or rotations. 
+        Consistent results even for images with low correlation.
+        Can achieve up to 1/20th pixel accuracy
+    Cons:
+        SVD can be quite slow and may become unstable for very small images
+        Can be sensitive to aliasing effects during image acquisition and edge effects caused by the DFT
+
+    Preprocessing:
+    A window function such as a Hamming or a Blackman window should be applied to each image to avoid edge
+    effects.
+    Masking out higher frequencies in the Normalized cross-power spectrum R should be performed 
+    in order to reduce the impact of aliasing.
+
+    How to use:
+    plot = True 
+        Subplot of the phase difference and the 1D unwrapped phase difference.
+        Plot of Frequency Spectrum of the discrete Fourier transform.
+    Radius 
+    '''
+
+    M = dftL.shape[0]
+    N = dftL.shape[1]
+
+    dftShiftL = np.fft.fftshift(dftL)
+    dftShiftR = np.fft.fftshift(dftR)
+    
+    #Mask out spectral components that lie outside a radius from the central peak
+    maskedDftL = radMask(dftShiftL,radius)
+    maskedDftR = radMask(dftShiftR,radius)
+    
+    #Mask out spectral components for DFT's that have peaks with magnitudes less than a threshold value
+    #maskedDftL = magMask(maskedDftL,magThres)
+    #maskedDftR = magMask(maskedDftR,magThres)
+
+    # Normalized cross-power spectrum 
+    R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
+
+    U,S,V  = np.linalg.svd(R) #Reduce from 2D to 1D 
+
+    dominantV = V[np.argmax(S),:]
+    dominantU = U[:,np.argmax(S)]
+
+    A = []
+    for i in range(len(V)):
+        A.append(i)
+    A = np.vstack([A, np.ones(len(A))]).T #Refered to as R in the paper
+
+    angleV = np.angle(dominantV)  #Find the angle
+    unwrapV = np.unwrap(angleV)
+
+    maxInliers, maxX,maxY,maxCoef = RANSAC(A[:,0],unwrapV,1000,0.5)
+    muX = maxCoef[0] #slope of the fitted line
+    cX = maxCoef[1] #abscissa of the fitted line
+    subShiftX = muX * (M / (2*np.pi)) #translational shift
+
+    angleU = np.angle(dominantU)  #Find the angle
+    unwrapU = np.unwrap(angleU)
+    fittedLineU, res,rank,s = np.linalg.lstsq(A,unwrapU,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
+    muY = fittedLineU[0] #slope of the fitted line
+    #cY = fittedLineU[1] #abscissa of the fitted line
+    subShiftY = muY * (N / (2*np.pi)) #translational shift
+
+    if plot: 
+        temp = unwrapV.shape[0]
+        fx= (np.linspace(-temp/2,temp/2-1,temp)/temp);    # FM = number of pixel in x direction 
+        fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
+        fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
+
+        fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
+        axarr[0].set_title("Phase component")
+        axarr[0].grid(True)
+        axarr[0].plot(fx, angleV)
+        
+        x = np.linspace(0,temp,temp)
+        axarr[1].set_title("Unwrapped Phase component")
+        axarr[1].grid(True)
+        axarr[1].plot(x, unwrapV)
+        line, = axarr[1].plot(x, muX*x+cX, "--")
+        line.set_label('Fitted line')
+        axarr[1].text(0,max(unwrapV),"Estimated shift: "+str(round(subShiftX,3)),fontsize=12)
+        axarr[1].text(max(x)/2,(max(unwrapV)+min(unwrapV))/2,"Slope: "+str(round(muY,7)))
+        axarr[1].legend(fontsize=15, bbox_to_anchor=(1, 0.15))
+        plt.show()
+    
+    
+    return subShiftX,subShiftY
+
 def computeSID(dftL,dftR, radius=0.6, magThres=0, plot=False):
     ''' 
     Subspace identification (SID) method for sub-pixel estimation.
@@ -125,18 +254,18 @@ def computeSID(dftL,dftR, radius=0.6, magThres=0, plot=False):
     subShiftY = muY * (N / (2*np.pi)) #translational shift
 
     if plot: 
-        plotDFT("Frequency Spectrum Left Image",maskedDftL)
-        plotDFT("Frequency Spectrum Right Image",maskedDftR)
+        #plotDFT("Frequency Spectrum Left Image",maskedDftL)
+        #plotDFT("Frequency Spectrum Right Image",maskedDftR)
 
         temp = unwrapV.shape[0]
         fx= (np.linspace(-temp/2,temp/2-1,temp)/temp);    # FM = number of pixel in x direction 
         fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
         fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
-
+        test = np.linspace(0,np.pi,temp)
         fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
         axarr[0].set_title("Phase component")
         axarr[0].grid(True)
-        axarr[0].plot(fx, angleV)
+        axarr[0].plot( test, angleV)
         
         x = np.linspace(0,temp,temp)
         axarr[1].set_title("Unwrapped Phase component")
@@ -331,6 +460,43 @@ def computeCCinter(imgL, imgR, plot=False):
     x_shift = int(M/2)-X2[idxMax[0],idxMax[1]]
     return x_shift
 
+
+def parbola(y):
+    dx = ((y[2])-(y[0]))/(2*(2*(y[1])-(y[2])-(y[0])))
+    return dx
+
+def computeCCinter2(imgL, imgR, plot=False):
+    M = imgL.shape[0]
+    dftG = (np.fft.fft2(imgL))
+    dftG2 = (np.fft.fft2(imgR))
+    cc = np.fft.ifft2(dftG*np.conjugate(dftG2))
+    for i in range(int(M/2)):
+            cc = np.roll(cc, -1, axis=1)
+
+    cc = cc.real
+    idxMax = np.unravel_index(cc.argmax(), cc.shape)   
+
+    dist = 1
+    y = np.array([cc[idxMax[0],idxMax[1]-dist], cc[idxMax[0],idxMax[1]], cc[idxMax[0],idxMax[1]+dist]])
+    x = np.linspace(idxMax[1]-dist,idxMax[1]+dist,3).astype(int)
+
+    x_shift = int(M/2)-parbola(y)-idxMax[1]
+
+    if plot:
+        temp = M
+        xx = np.linspace(0,temp,temp).astype(int)  
+        fig, axarr = plt.subplots(1,1)
+        axarr.grid(True)
+        axarr.plot(xx,cc[idxMax[0],:] )
+        #axarr.plot(newX,p(newX))
+        axarr.plot(x[0],y[0], marker="o", color="green")
+        axarr.plot(x[1],y[1], marker="o", color="green")
+        axarr.plot(x[2],y[2], marker="o", color="green")
+        #axarr.text(maxPeak[0],maxPeak[1],str(x_shift),horizontalalignment='right')
+        plt.show()
+        
+    return x_shift
+
 def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc = "blackman"):
 
     # Creating a window around the feature
@@ -393,8 +559,8 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
 
 def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
 
-    dftShiftL = np.fft.fftshift(dftL)
-    dftShiftR = np.fft.fftshift(dftR)
+    dftShiftL = dftL #np.fft.fftshift(dftL)
+    dftShiftR = dftR #np.fft.fftshift(dftR)
 
     #Mask out spectral components that lie outside a radius from the central peak
     #maskedDftL = radMask(dftShiftL,radius)
@@ -408,7 +574,7 @@ def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
     
     theta = np.arctan2(R.imag,R.real)  #Can also use theta = np.angle(R) 
 
-    # Plot of phase component before removal of integer shift (figure 3)
+    # Plot of phase component
     fig = plt.figure()
     xData, yData = np.mgrid[(-theta.shape[0]/2):(theta.shape[0]/2), (-(theta.shape[1])/2):(theta.shape[1]/2)]
     ax = fig.gca(projection='3d')
