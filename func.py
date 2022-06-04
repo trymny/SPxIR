@@ -15,7 +15,7 @@ import numpy as np
 import cv2 as cv
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import RectBivariateSpline
-
+from scipy.optimize import minimize
 
 def stereoImgResize(imgL,imgR, scale_percent,interMethod):
     width = int(imgL.shape[1] * scale_percent / 100)
@@ -44,55 +44,58 @@ def windowFunc(funcType, win):
 
 def magMask(dft,param=0):
     for i in range(dft.shape[0]):
-        maxValue = abs(np.max(dft[i]))
+        maxValue = (np.max(abs(dft[i])))
         if(maxValue <= param):
-            dft[i] = 0.00001   # zeroes out row i
-            #dft[:,i] = 0.00001 # zeroes out column i
+            #dft[i] = 0.00001   # zeroes out row i
+            dft[:,i] = 0.00001 # zeroes out column i
     return dft
 
 def radMask(dft,param=0.6):
     N = dft.shape[1]
     radius = param*((N)/(2))
-    maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius)]
+    maskedDft = dft[int(dft.shape[0]/2-radius):int(dft.shape[0]/2+radius),int(dft.shape[1]/2-radius):int(dft.shape[1]/2+radius)]
     return maskedDft
 
-def RANSAC(xData,yData, MAX_ITER, DIST_THRES):
-    maxInliers = 0
-    maxCoef = [0,0]
-    for i in range(MAX_ITER):
-        #print("-----------------------")
-        #Step 1 Select two random points
-        X = np.array([0,0])
-        Y = np.array([0,0])
-        while (X[0] == X[1] and Y[0] == Y[1]):
-            ranPoint1 = np.random.randint(0,len(xData))
-            ranPoint2 = np.random.randint(0,len(xData))
-            X = np.array([xData[ranPoint1],xData[ranPoint2]])
-            Y = np.array([yData[ranPoint1],yData[ranPoint2]])
+def LMSQ(xdata, ydata):
 
-        #Step 2 Fit a line 
-        coef = np.polyfit(X,Y,1)
-        poly1d_fn = np.poly1d(coef)
+    def obj(coeff):
+        M = len(ydata)
+        dy = np.diff(ydata)/np.diff(xdata)
+        x0 = coeff
+        return np.median((2*np.pi/M)*x0-dy)**2 
+    
+    coeff = 0
+    res = minimize(obj,coeff)  
 
-        #Step 3 Distance from line
-        inliers = 0
-        for n in range (len(xData)):
-            a = coef[0]/coef[1]
-            b = 1/coef[1]
-            d = abs(a*xData[n] - b*yData[n]+1)/np.sqrt(a**2+b**2)
-            if d > 0.01 and d < DIST_THRES:
-                inliers += 1
-                    
-        # Step 4
-        if (maxInliers < inliers):
-            maxInliers = inliers
-            maxX = X
-            maxY = Y
-            maxCoef = coef 
+    return res.x
 
-    return maxInliers, maxX,maxY,maxCoef
+def forooshBalci(dftL,dftR):
+    M = dftL.shape[0]
+    N = dftL.shape[1]
 
-def SID_RANSAC(dftL,dftR, radius=0.6, magThres=0, plot=False):
+    dftShiftL = np.fft.fftshift(dftL)
+    dftShiftR = np.fft.fftshift(dftR)
+
+    # Normalized cross-power spectrum 
+    R = (dftShiftL*np.conjugate(dftShiftR))/(np.abs(dftShiftL*np.conjugate(dftShiftR)))
+
+    # Phase difference matrix 
+    P = np.arctan2(R.imag,R.real)
+
+    s = (M,N)
+    U = np.zeros(s)  
+    U = np.unwrap(P,axis=1)     
+    rows = U
+
+    temp = rows.shape[0]
+    xdata = np.linspace(0,temp,temp)
+
+    x_shift = LMSQ(xdata,rows)
+    
+    return x_shift
+
+
+def hoge(dftL,dftR, radius=0.6, magThres=0, plot=False):
     ''' 
     Subspace identification (SID) method for sub-pixel estimation.
     SID is an extension to the Phase Correlation Method and developed by William Scott Hoge
@@ -127,10 +130,6 @@ def SID_RANSAC(dftL,dftR, radius=0.6, magThres=0, plot=False):
     #Mask out spectral components that lie outside a radius from the central peak
     maskedDftL = radMask(dftShiftL,radius)
     maskedDftR = radMask(dftShiftR,radius)
-    
-    #Mask out spectral components for DFT's that have peaks with magnitudes less than a threshold value
-    #maskedDftL = magMask(maskedDftL,magThres)
-    #maskedDftR = magMask(maskedDftR,magThres)
 
     # Normalized cross-power spectrum 
     R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
@@ -147,100 +146,7 @@ def SID_RANSAC(dftL,dftR, radius=0.6, magThres=0, plot=False):
 
     angleV = np.angle(dominantV)  #Find the angle
     unwrapV = np.unwrap(angleV)
-
-    maxInliers, maxX,maxY,maxCoef = RANSAC(A[:,0],unwrapV,1000,0.5)
-    muX = maxCoef[0] #slope of the fitted line
-    cX = maxCoef[1] #abscissa of the fitted line
-    subShiftX = muX * (M / (2*np.pi)) #translational shift
-
-    angleU = np.angle(dominantU)  #Find the angle
-    unwrapU = np.unwrap(angleU)
-    fittedLineU, res,rank,s = np.linalg.lstsq(A,unwrapU,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
-    muY = fittedLineU[0] #slope of the fitted line
-    #cY = fittedLineU[1] #abscissa of the fitted line
-    subShiftY = muY * (N / (2*np.pi)) #translational shift
-
-    if plot: 
-        temp = unwrapV.shape[0]
-        fx= (np.linspace(-temp/2,temp/2-1,temp)/temp);    # FM = number of pixel in x direction 
-        fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
-        fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
-
-        fig, axarr = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
-        axarr[0].set_title("Phase component")
-        axarr[0].grid(True)
-        axarr[0].plot(fx, angleV)
-        
-        x = np.linspace(0,temp,temp)
-        axarr[1].set_title("Unwrapped Phase component")
-        axarr[1].grid(True)
-        axarr[1].plot(x, unwrapV)
-        line, = axarr[1].plot(x, muX*x+cX, "--")
-        line.set_label('Fitted line')
-        axarr[1].text(0,max(unwrapV),"Estimated shift: "+str(round(subShiftX,3)),fontsize=12)
-        axarr[1].text(max(x)/2,(max(unwrapV)+min(unwrapV))/2,"Slope: "+str(round(muY,7)))
-        axarr[1].legend(fontsize=15, bbox_to_anchor=(1, 0.15))
-        plt.show()
     
-    
-    return subShiftX,subShiftY
-
-def computeSID(dftL,dftR, radius=0.6, magThres=0, plot=False):
-    ''' 
-    Subspace identification (SID) method for sub-pixel estimation.
-    SID is an extension to the Phase Correlation Method and developed by William Scott Hoge
-    and based on the paper "A Subspace Identification Extension to the Phase Correlation Method"
-    Pros:
-        Accurate and robust for images with large shifts or rotations. 
-        Consistent results even for images with low correlation.
-        Can achieve up to 1/20th pixel accuracy
-    Cons:
-        SVD can be quite slow and may become unstable for very small images
-        Can be sensitive to aliasing effects during image acquisition and edge effects caused by the DFT
-
-    Preprocessing:
-    A window function such as a Hamming or a Blackman window should be applied to each image to avoid edge
-    effects.
-    Masking out higher frequencies in the Normalized cross-power spectrum R should be performed 
-    in order to reduce the impact of aliasing.
-
-    How to use:
-    plot = True 
-        Subplot of the phase difference and the 1D unwrapped phase difference.
-        Plot of Frequency Spectrum of the discrete Fourier transform.
-    Radius 
-    '''
-
-    M = dftL.shape[0]
-    N = dftL.shape[1]
-
-    dftShiftL = np.fft.fftshift(dftL)
-    dftShiftR = np.fft.fftshift(dftR)
-    
-    #Mask out spectral components that lie outside a radius from the central peak
-    maskedDftL = radMask(dftShiftL,radius)
-    maskedDftR = radMask(dftShiftR,radius)
-    
-    #Mask out spectral components for DFT's that have peaks with magnitudes less than a threshold value
-    #maskedDftL = magMask(maskedDftL,magThres)
-    #maskedDftR = magMask(maskedDftR,magThres)
-
-    # Normalized cross-power spectrum 
-    R = (maskedDftL*np.conjugate(maskedDftR))/(np.abs(maskedDftL*np.conjugate(maskedDftR)))  
-
-    U,S,V  = np.linalg.svd(R) #Reduce from 2D to 1D 
-
-    dominantV = V[np.argmax(S),:]
-    dominantU = U[:,np.argmax(S)]
-
-    A = []
-    for i in range(len(V)):
-        A.append(i)
-    A = np.vstack([A, np.ones(len(A))]).T #Refered to as R in the paper
-
-    angleV = np.angle(dominantV)  #Find the angle
-    unwrapV = np.unwrap(angleV)
-
     fittedLineV, res,rank,s = np.linalg.lstsq(A,unwrapV,rcond=-1) #Equation 6 inv(R^TR)R^Tunwrap(v)
     muX = fittedLineV[0] #slope of the fitted line
     cX = fittedLineV[1] #abscissa of the fitted line
@@ -254,7 +160,8 @@ def computeSID(dftL,dftR, radius=0.6, magThres=0, plot=False):
     subShiftY = muY * (N / (2*np.pi)) #translational shift
 
     if plot: 
-        #plotDFT("Frequency Spectrum Left Image",maskedDftL)
+        #plotDFT("Frequency Spectrum Left Image",dftShiftL)
+        #plotDFT(dftShiftL,maskedDftL)
         #plotDFT("Frequency Spectrum Right Image",maskedDftR)
 
         temp = unwrapV.shape[0]
@@ -314,8 +221,14 @@ def computeGradCorr(img, img2, gradMethod = "hvdiff", polyDeg = 2, nPoints = 200
         gHor2 = img2
         gVer2 = img2
 
-    g = gHor - np.imag(gVer)
-    g2 = gHor2 - np.imag(gVer2)
+    if gradMethod != "canny":
+        g = gHor - np.imag(gVer)
+        g2 = gHor2 - np.imag(gVer2)
+    else:
+        g = cv.Canny(img,100,200)
+        g2 = cv.Canny(img2,100,200)
+        cv.imshow("dsaasd",g2)
+        cv.waitKey(0)
 
     dftG = (np.fft.fft2(g))
     dftG2 = (np.fft.fft2(g2))
@@ -345,21 +258,21 @@ def computeGradCorr(img, img2, gradMethod = "hvdiff", polyDeg = 2, nPoints = 200
          
         temp = M
         xx = np.linspace(0,temp,temp).astype(int)  
-        fig, axarr = plt.subplots(1,1)
+        fig, axarr = plt.subplots(1,1,figsize=(16, 10))
         axarr.grid(True)
         axarr.plot(xx,cc[idxMax[0],:] )
         axarr.plot(newX,p(newX))
         axarr.plot(x[0],y[0], marker="o", color="green")
         axarr.plot(x[1],y[1], marker="o", color="green")
         axarr.plot(x[2],y[2], marker="o", color="green")
-        axarr.text(maxPeak[0],maxPeak[1],str(x_shift),horizontalalignment='right')
+        axarr.text(maxPeak[0],maxPeak[1],str(round(x_shift,4)),horizontalalignment='right',fontsize=15)
         plt.show()
          
-        f, axarr = plt.subplots(1,2)
-        axarr[0].imshow(img,cmap='gray')
-        axarr[1].imshow(cv.addWeighted(gHor, 0.5, gVer, 0.5, 0),cmap='gray')
-        f.suptitle(gradMethod)
-        axarr[1].set_title(str(x_shift))
+        f, axarr = plt.subplots(1,2,figsize=(16, 10))
+        axarr[0].imshow(cv.addWeighted(gHor, 0.5, gVer, 0.5, 0),cmap='gray')
+        axarr[1].imshow(cv.addWeighted(gHor2, 0.5, gVer2, 0.5, 0),cmap='gray')
+        #f.suptitle(gradMethod,fontsize=20)
+        #axarr[1].set_title(str(x_shift))
         plt.show()
         
     
@@ -460,12 +373,15 @@ def computeCCinter(imgL, imgR, plot=False):
     x_shift = int(M/2)-X2[idxMax[0],idxMax[1]]
     return x_shift
 
+def gauss(y): #Does not work well
+    dx = (np.log(y[2])-np.log(y[0]))/(2*(np.log(y[1])-np.log(y[2])-np.log(y[0])))
+    return dx
 
 def parbola(y):
     dx = ((y[2])-(y[0]))/(2*(2*(y[1])-(y[2])-(y[0])))
     return dx
 
-def computeCCinter2(imgL, imgR, plot=False):
+def computeCCinter2(imgL, imgR, method="parabola", plot=False):
     M = imgL.shape[0]
     dftG = (np.fft.fft2(imgL))
     dftG2 = (np.fft.fft2(imgR))
@@ -480,7 +396,10 @@ def computeCCinter2(imgL, imgR, plot=False):
     y = np.array([cc[idxMax[0],idxMax[1]-dist], cc[idxMax[0],idxMax[1]], cc[idxMax[0],idxMax[1]+dist]])
     x = np.linspace(idxMax[1]-dist,idxMax[1]+dist,3).astype(int)
 
-    x_shift = int(M/2)-parbola(y)-idxMax[1]
+    if(method == "parabola"):
+        x_shift = int(M/2)-parbola(y)-idxMax[1]
+    elif(method == "gauss"):
+        x_shift = int(M/2)-gauss(y)-idxMax[1]
 
     if plot:
         temp = M
@@ -559,8 +478,8 @@ def blockMatching(imgL, imgR,X_L, Y_L, M, N, method="TM_CCORR_NORMED", winFunc =
 
 def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
 
-    dftShiftL = dftL #np.fft.fftshift(dftL)
-    dftShiftR = dftR #np.fft.fftshift(dftR)
+    dftShiftL = dftL
+    dftShiftR = dftR 
 
     #Mask out spectral components that lie outside a radius from the central peak
     #maskedDftL = radMask(dftShiftL,radius)
@@ -579,7 +498,7 @@ def plotPhaseDifference(dftL,dftR,radius=0.6,rStepSize=2, cStepSize=2, aa=True):
     xData, yData = np.mgrid[(-theta.shape[0]/2):(theta.shape[0]/2), (-(theta.shape[1])/2):(theta.shape[1]/2)]
     ax = fig.gca(projection='3d')
     ax.set_title('Phase differences')
-    ax.plot_wireframe(xData,yData,theta,rstride=rStepSize, cstride=cStepSize,antialiased=aa)
+    ax.plot_surface(xData,yData,theta,rstride=rStepSize, cstride=cStepSize,antialiased=aa)
     plt.show()
 
 def plotSurface(func, wireframe=False,rStepSize=1, cStepSize=1, aa=True):
@@ -603,14 +522,16 @@ def plotSurface(func, wireframe=False,rStepSize=1, cStepSize=1, aa=True):
 
     plt.show()
 
-def plotDFT(title, dft):
-    M = dft.shape[0]
+def plotDFT(img, dft):
+    M = img.shape[0]
     fx= (np.linspace(-M/2,M/2-1,M)/M);    # FM = number of pixel in x direction 
     fx = fx *2 * np.pi                    # Multiply with 2pi to get the (spatial) frequency 
     fx = np.reshape(fx, (-1, 1))          # Go from shape (M,) to (M,1)
-    fig = plt.figure()
+    fig = plt.figure(figsize=(16, 10))
     ax = fig.gca()
     ax.grid(True)
-    ax.set_title(title)
-    ax.plot(fx,abs(dft))
+    #ax.set_xlim([-3.14,3.14])
+    #ax.set_title(title)
+    ax.plot(fx,(np.abs(img)))
     plt.show()
+    
